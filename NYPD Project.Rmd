@@ -1,0 +1,260 @@
+---
+title: "NYPD Shooting Incident Data"
+output: html_document
+---
+
+```{r libraries, message = FALSE, warning = FALSE}
+library(tidyverse)
+```
+
+## <span style='color:#0066CC'>1. Research question and the source of data</span>
+
+For this project, we use data about shooting incidents in NYC from 2006 to 2024.
+
+My **research question is**: what factors correlate with the mortality of shooting incidents?
+
+The data was downloaded from [Data.gov](https://data.gov/). 
+
+Here is the main dataset page, which lists the available download formats and the metadata description: [NYPD Shooting Incident Data (Historic)](https://catalog.data.gov/dataset/archived_nypd-shooting-incident-data-historic?from_hint=eyJxIjoiTllQRCBzaG9vdGluZyJ9).
+
+In the code below, I loaded the dataset and saved it as **NYPD_data**:
+
+```{r upload data, message = FALSE}
+url = "https://data.cityofnewyork.us/api/v3/views/833y-fsy8/export.csv?accessType=DOWNLOAD"
+NYPD_data = read_csv(url)
+```
+
+In the code chunk below, a summary of the initial dataset is provided.
+
+```{r Initial summary}
+summary(NYPD_data)
+```
+
+
+## <span style='color:#0066CC'>2.Tidy and Transform Data</span>
+
+### 2.1 First look at the data. Initial transformation
+
+The most interesting variable for the research question is the boolean *STATISTICAL_MURDER_FLAG*. If it is TRUE, the shooting incident resulted in a murder. To make the initial summary more informative, I converted most variables with the character data type to factors and changed the column OCCUR_DATE to the date data type. I also removed the columns with specific geographic locations, such as coordinates, longitude, and latitude, as well as the unique row identifier INCIDENT_KEY.
+
+```{r initial data transform}
+NYPD_data = NYPD_data %>%
+            mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>% # changing OCCUR_DATE to date data type
+            mutate(across(c(BORO:LOCATION_DESC, PERP_AGE_GROUP:VIC_RACE), as.factor)) %>% # changing appropriate variables to factor
+            select(-c(INCIDENT_KEY)) %>% # removing incident_key column from data
+            select(-c(X_COORD_CD:Lon_Lat)) # removing columns with specific geographic location
+
+summary(NYPD_data)
+```
+
+### 2.2 Deleting columns not used in analysis
+
+In the summary above, we can see that the columns with location information have many missing values: *LOC_OF_OCCUR_DESC* and *LOC_CLASSFCTN_DESC* (25,596 NAs, $86\%$ of the dataset) and *LOCATION_DESC* (14,977 NAs, $50\%$ of the dataset). Due to the abundance of NA values, these columns were deleted.
+
+Columns with information about perpetrators were also deleted from the dataset because they have many NAs (roughly $31\%$ of the dataset). I also excluded information about the race of victims from the analysis due to ethical considerations.
+
+The *PRECINCT* and *JURISDICTION_CODE* columns were deleted because they are not very relevant to my research question.
+
+```{r deleting columns}
+NYPD_data = NYPD_data %>%
+            select(-c(LOC_OF_OCCUR_DESC:LOCATION_DESC)) %>% # removing columns with specific location information
+            select(-c(PERP_AGE_GROUP:PERP_RACE)) %>% # removing information about perpetrators
+            select(-c(VIC_RACE)) # removing information about victims race
+  
+summary(NYPD_data)
+head(NYPD_data, 3)
+```
+
+### 2.3 Dealing with the remaining NA values
+
+In the summary table above, we can see that the column VIC_SEX has 12 NA values (marked as *U*), and the column VIC_AGE_GROUP has 68 NA values (marked as *UNKNOWN*). The column VIC_AGE_GROUP also contains one possible typo (level: $1022$). All rows with the remaining NAs or the typo were deleted from the dataset.
+
+```{r deleting rows with NA for VIC}
+NYPD_data = NYPD_data %>%
+            filter(VIC_SEX != "U") %>%
+            mutate(VIC_SEX = droplevels(VIC_SEX)) # drop unknowns from VIC_SEX (only 12 rows)
+
+NYPD_data = NYPD_data %>%
+            filter(VIC_AGE_GROUP != "UNKNOWN") %>%
+            mutate(VIC_AGE_GROUP = droplevels(VIC_AGE_GROUP)) %>% # drop additional unknows from VIC_AGE_GROUP (additional 62 rows)
+            filter(VIC_AGE_GROUP != "1022") %>%
+            mutate(VIC_AGE_GROUP = droplevels(VIC_AGE_GROUP)) # drop 1 additional row with possible typo in VIC_AGE_GROUP
+
+summary(NYPD_data)
+```
+
+### 2.4 Additional transformation of DATE column
+
+Now our data contains only the information relevant to our analysis, with no typos or NAs.
+
+Before starting the analysis, I need to make a few more data transformations. To address our research question, I want to investigate whether the murder rate differs between cold and warm months in NYC. For this purpose, I added a column named **season** with two levels: *cold season* (from October to March) and *warm season* (from April to September).
+
+```{r adding season column}
+NYPD_data = NYPD_data %>%
+            mutate(
+              month = month(OCCUR_DATE),  # adding supporting 'month' column
+              season = case_when(         # creating 'season' column by using info from 'month' 
+                month %in% c(10,11,12,1,2,3) ~ "cold season",
+                month %in% c(4,5,6,7,8,9) ~ "warm season"
+              ),
+              season = factor(season, levels = c("cold season", "warm season")) # converting 'season' column to factor
+            ) %>%
+            select(-c(month)) # deleting supporting 'month' column
+
+summary(NYPD_data)
+```
+
+### 2.5 Additional transformation of TIME column
+
+I also want to investigate whether daylight correlates with murder rate. For this purpose, I added a column named **daylight** with two levels: *day* (6am-8pm in a summer, 7am-5pm in a winter) and *night*.
+
+```{r adding daylight column}
+NYPD_data = NYPD_data %>%
+  mutate(
+    hour = hour(hms(OCCUR_TIME)), # adding supporting 'hour' column
+    daylight = case_when(         # creating 'daylight' column by using info from 'hour' and 'season'
+      season == "warm season" & hour >=6 & hour < 20 ~ "day",
+      season == "cald season" & hour >=7 & hour < 5 ~ "day",
+      TRUE ~ "night"
+    ),
+    daylight = factor(daylight, levels = c("day", "night")) # converting 'daylight' column to factor
+  ) %>%
+  select(-c(hour)) %>% # deleting supporting 'hour' column
+  select(-c(OCCUR_TIME)) # deleting "OCCUR_TIME"column, was used for creating 'daylight' column
+```
+
+### 2.6 Cleaned and Transformed Data 
+
+Finaly, we have dataset ready for further analysis!
+
+```{r}
+summary(NYPD_data)
+head(NYPD_data, 3)
+```
+
+## <span style='color:#0066CC'>3. Visualizing Data</span>
+
+### 3.1 Visualization 1: Number of shootings year by year
+
+First, let's see how the number of shootings (both total and fatal) changed year by year. To do this, we need to create a supporting table for the visualization.
+
+```{r Creating supporting table for Viz 1}
+
+yearly = NYPD_data %>% # creating supporting table for viz
+  mutate(year = year(OCCUR_DATE)) %>% # adding year column to NYPD_data
+  group_by(year) %>% # in the new 'yearly' table pivot data for each year
+  summarise(
+    `All shootings`     = n(), # add column 'All shootings' (sum for each year)
+    `Murders` = sum(STATISTICAL_MURDER_FLAG)) %>% # add column 'Murders' (sum for each year) 
+  pivot_longer(-year, names_to = "type", values_to = "count") # change table from wide to long format
+
+head(yearly, 6)
+```
+
+```{r Viz 1: number of shootings per year}
+ggplot(yearly, aes(x = year, y = count, color = type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = seq(2006, 2024, by = 2)) +
+  labs(
+    title = "NYPD shooting incidents by year",
+    x = "Year",
+    y = "Number of shootings") +
+  theme_bw() +
+  scale_color_manual(values = c("#CFB87C", "#d95f02")) +
+  theme(legend.position = "top")
+```
+
+From the plot, we can say that the number of shootings steadily declined from 2006 to 2019, and then we can see a drastic spike in shooting incidents during the COVID-19 pandemic and lockdown period. After that, the number of shootings started to decline again. The number of fatal shootings follows a similar trend. Looking at the graph, I decided not to include the year of the incident in the model, as this would add a significant number of parameters (which we want to avoid), and the fatality rate (ratio of murders to all shootings) does not seem to have changed drastically from year to year.
+
+### 3.2 Visualization 2: Fatality rate for each victim age group
+
+Let's see how the fatality rate (the ratio of murders to all shootings) differs across victim age groups. Again, to make a visualization, we need to create a supporting table.
+
+```{r creating table for Viz 2: Fatality rate by age group}
+rate_age = NYPD_data %>%
+           group_by(VIC_AGE_GROUP) %>% # pivot data by victim age group
+           summarise(n = n(), # number of observation for each age group
+                     rate = mean(STATISTICAL_MURDER_FLAG)) # rate of murder to all cases for each age group
+rate_age
+```
+
+```{r Viz 2: Fatality rate by age group}
+ggplot(rate_age, aes(x = VIC_AGE_GROUP, y = rate)) +
+  geom_col(fill = "#CFB87C") +
+  labs(x = "Victim age group", y = "Fatality rate", title = "Fatality rate by victim age") +
+  theme_bw()
+```
+
+
+The plot clearly shows a strong correlation between the victim's age group and the fatality rate. The higher the age of the victim, the more likely it is that the shooting will be fatal. The VIC_AGE_GROUP variable is probably the strongest predictor in the model.
+
+## <span style='color:#0066CC'>4. Modelling Data</span>
+
+### 4.1 First Model
+
+To answer the research question of what factors correlate with the mortality of shooting incidents, I decided to use logistic regression.
+
+I included the following independent variables in the model:
+
+- BORO: the five boroughs of NYC (to include geographic information in the model);
+
+- VIC_AGE_GROUP: the age group of the victim (the graph above showed that this variable is significant);
+
+- VIC_SEX: male or female;
+
+- season: warm or cold (to include weather in the model);
+
+- daylight: day or night.
+
+```{r Model: logistic regression}
+glmod = glm(STATISTICAL_MURDER_FLAG ~ BORO + VIC_AGE_GROUP + VIC_SEX + season + daylight,
+            data = NYPD_data,
+            family = binomial) #we need binomial regression from the family of generalized linear models (logistic regression is a special case of binomial, when response is logical variable)
+
+summary(glmod)
+```
+
+### 4.2 Second Model
+
+In the summary above, we can see that the VIC_SEX variable is not statistically significant (its p-value is higher than any reasonable threshold), and among the boroughs, only Manhattan is statistically significant. As a result, I decided to drop the VIC_SEX variable from the model and transform the BORO variable into a variable with two levels: *Manhattan* and *Other*. Using the transformed dataset, I fit the logistic regression again.
+
+```{r create new factor for Boroughs}
+NYPD_data = NYPD_data %>% # creating new borough variable with 2 levels: Manhattan and Other
+            mutate(boro_manhattan = if_else(BORO == "MANHATTAN", "Manhattan", "Other"),
+                   boro_manhattan = factor(boro_manhattan, levels = c("Other", "Manhattan"))) %>%
+            select(-c(BORO)) # delete old borough variable
+
+summary(NYPD_data)
+```
+
+```{r}
+glmod_final = glm(STATISTICAL_MURDER_FLAG ~ VIC_AGE_GROUP + season + daylight + boro_manhattan,
+                  data = NYPD_data,
+                  family = binomial)
+```
+
+### 4.3 Conclusion
+
+Now we can see in the model summary that all variables are statistically significant and associated with fatality. There is a positive correlation between the victim’s age and fatality (the older the victim, the higher the odds of fatality). The warm season, nighttime, and shootings in Manhattan are slightly negatively correlated with fatality (the odds are lower). I should acknowledge that the model has low predictive power, because many other factors not present in the dataset affect the fatality of a shooting, such as firearm type, caliber, etc.
+
+```{r}
+summary(glmod_final)
+```
+
+## <span style='color:#0066CC'>5. Bias consideration</span>
+
+*Data bias.* The dataset contains only incidents recorded by the NYPD, so it reflects reporting and policing practices.
+
+*Modeling bias.* Several decisions were subjective, such as which variables to include in the model and which model to choose.
+
+*Personal bias.* I chose the research question and the variables I expected to matter (season and time of day) before looking at the results, and I may have favored explanations that seemed intuitive to me.
+
+**How I tried to reduce bias:** I excluded victim race from the model for ethical reasons, to avoid presenting results that could reinforce stereotypes.
+
+## <span style='color:#0066CC'>6. Session Info</span>
+
+```{r}
+sessionInfo()
+```
+
